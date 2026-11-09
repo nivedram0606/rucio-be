@@ -23,6 +23,7 @@ async function main() {
         create: { permissionKey, module, action },
       });
     }),
+    { timeout: 30000, maxWait: 10000 },
   );
 
   console.log(`Synchronized ${ALL_KEYS.length} permission keys.`);
