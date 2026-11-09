@@ -4,6 +4,7 @@ export const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 export type CookieSerializeOptions = {
   isProduction?: boolean;
   maxAgeMs?: number;
+  sameSite?: "Strict" | "Lax" | "None";
 };
 
 /**
@@ -39,16 +40,17 @@ export function serializeSessionCookie(token: string, options: CookieSerializeOp
   const isProduction = options.isProduction ?? false;
   const maxAgeMs = options.maxAgeMs ?? SESSION_TTL_MS;
   const maxAgeSeconds = Math.max(0, Math.floor(maxAgeMs / 1000));
+  const sameSite = options.sameSite ?? (process.env.COOKIE_SAME_SITE as "Strict" | "Lax" | "None") ?? "Strict";
 
   const directives = [
     `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
     "Path=/api",
     "HttpOnly",
-    "SameSite=Strict",
+    `SameSite=${sameSite}`,
     `Max-Age=${maxAgeSeconds}`,
   ];
 
-  if (isProduction) {
+  if (isProduction || sameSite === "None") {
     directives.push("Secure");
   }
 
@@ -58,25 +60,26 @@ export function serializeSessionCookie(token: string, options: CookieSerializeOp
 /**
  * Serializes a Set-Cookie header that clears the session cookie immediately.
  */
-export function serializeClearSessionCookie(options: Pick<CookieSerializeOptions, "isProduction"> = {}): string {
+export function serializeClearSessionCookie(options: Pick<CookieSerializeOptions, "isProduction" | "sameSite"> = {}): string {
   const isProduction = options.isProduction ?? false;
+  const sameSite = options.sameSite ?? (process.env.COOKIE_SAME_SITE as "Strict" | "Lax" | "None") ?? "Strict";
   const directives = [
     `${SESSION_COOKIE_NAME}=`,
     "Path=/api",
     "HttpOnly",
-    "SameSite=Strict",
+    `SameSite=${sameSite}`,
     "Max-Age=0",
     "Expires=Thu, 01 Jan 1970 00:00:00 GMT",
   ];
 
-  if (isProduction) {
+  if (isProduction || sameSite === "None") {
     directives.push("Secure");
   }
 
   return directives.join("; ");
 }
 
-function isLoopback(hostWithPort: string): boolean {
+export function isLoopback(hostWithPort: string): boolean {
   let hostname: string;
   try {
     hostname = new URL(`http://${hostWithPort}`).hostname.toLowerCase();
@@ -92,18 +95,15 @@ function isLoopback(hostWithPort: string): boolean {
 }
 
 /**
- * Validates request origin against Host header and loopback restrictions to protect
- * state-changing cookie-authenticated endpoints from CSRF and cross-origin attacks.
+ * Validates request origin against Host header, X-Forwarded-Host, configured ALLOWED_ORIGIN,
+ * and loopback restrictions to protect state-changing endpoints from CSRF.
  */
 export function isAllowedOrigin(
   originHeader: string | undefined,
   hostHeader: string | undefined,
   secFetchSite?: string | string[] | undefined,
+  forwardedHost?: string | string[] | undefined,
 ): boolean {
-  if (typeof secFetchSite === "string" && secFetchSite === "cross-site") {
-    return false;
-  }
-
   // If no Origin header was provided (direct programmatic client or same-origin navigations)
   if (!originHeader) {
     return true;
@@ -116,8 +116,44 @@ export function isAllowedOrigin(
     return false;
   }
 
+  // Check explicit environment allowed origins (e.g. ALLOWED_ORIGIN or FRONTEND_URL in .env)
+  const envAllowed = [
+    process.env.ALLOWED_ORIGIN,
+    process.env.FRONTEND_URL,
+  ]
+    .filter(Boolean)
+    .flatMap((val) => (val as string).split(","))
+    .map((val) => val.trim().toLowerCase())
+    .filter(Boolean);
+
+  for (const allowed of envAllowed) {
+    try {
+      const allowedUrl = new URL(allowed.includes("://") ? allowed : `https://${allowed}`);
+      if (
+        originUrl.host.toLowerCase() === allowedUrl.host.toLowerCase() ||
+        originUrl.origin.toLowerCase() === allowedUrl.origin.toLowerCase()
+      ) {
+        return true;
+      }
+    } catch {
+      if (originUrl.host.toLowerCase() === allowed.toLowerCase()) {
+        return true;
+      }
+    }
+  }
+
+  if (typeof secFetchSite === "string" && secFetchSite === "cross-site") {
+    return false;
+  }
+
   // Exact host match between Origin URL host and Host header
   if (hostHeader && originUrl.host.toLowerCase() === hostHeader.toLowerCase()) {
+    return true;
+  }
+
+  // Exact match between Origin URL host and X-Forwarded-Host header (for reverse proxies like Netlify)
+  const fHost = Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost;
+  if (fHost && originUrl.host.toLowerCase() === fHost.split(",")[0].trim().toLowerCase()) {
     return true;
   }
 

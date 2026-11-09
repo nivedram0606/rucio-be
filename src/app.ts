@@ -16,6 +16,7 @@ import {
   serializeSessionCookie,
   serializeClearSessionCookie,
   isAllowedOrigin,
+  isLoopback,
   SESSION_COOKIE_NAME,
 } from "./auth/cookies";
 import {
@@ -573,6 +574,61 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     },
   });
 
+  app.addHook("onRequest", async (request, reply) => {
+    const origin = request.headers.origin;
+    if (!origin) return;
+
+    const allowedOrigins = [
+      process.env.ALLOWED_ORIGIN,
+      process.env.FRONTEND_URL,
+    ]
+      .filter(Boolean)
+      .flatMap((val) => (val as string).split(","))
+      .map((val) => val.trim().toLowerCase())
+      .filter(Boolean);
+
+    let isAllowed = false;
+    try {
+      const originUrl = new URL(origin);
+      const hostHeader = request.headers.host;
+      const forwardedHost = request.headers["x-forwarded-host"];
+      const fHost = Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost;
+
+      if (hostHeader && originUrl.host.toLowerCase() === hostHeader.toLowerCase()) {
+        isAllowed = true;
+      } else if (fHost && originUrl.host.toLowerCase() === fHost.split(",")[0].trim().toLowerCase()) {
+        isAllowed = true;
+      } else if (isLoopback(originUrl.host)) {
+        isAllowed = true;
+      } else if (
+        allowedOrigins.some((a) => {
+          try {
+            const parsed = new URL(a.includes("://") ? a : `https://${a}`);
+            return originUrl.host.toLowerCase() === parsed.host.toLowerCase();
+          } catch {
+            return originUrl.host.toLowerCase() === a.toLowerCase();
+          }
+        })
+      ) {
+        isAllowed = true;
+      }
+    } catch {
+      // Invalid origin URL
+    }
+
+    if (isAllowed) {
+      reply.header("Access-Control-Allow-Origin", origin);
+      reply.header("Access-Control-Allow-Credentials", "true");
+      reply.header("Access-Control-Allow-Methods", "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS");
+      reply.header("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Requested-With,x-onboarding-key");
+
+      if (request.method === "OPTIONS") {
+        reply.header("Content-Length", "0");
+        return reply.code(204).send();
+      }
+    }
+  });
+
   app.get(
     "/api/health",
     {
@@ -615,7 +671,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       },
     },
     async (request, reply) => {
-      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"])) {
+      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"], request.headers["x-forwarded-host"])) {
         return reply.code(403).send({ code: "FORBIDDEN", message: "Cross-origin request rejected." });
       }
 
@@ -695,7 +751,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       },
     },
     async (request, reply) => {
-      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"])) {
+      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"], request.headers["x-forwarded-host"])) {
         return reply.code(403).send({ code: "FORBIDDEN", message: "Cross-origin request rejected." });
       }
 
@@ -773,7 +829,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       },
     },
     async (request, reply) => {
-      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"])) {
+      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"], request.headers["x-forwarded-host"])) {
         return reply.code(403).send({ code: "FORBIDDEN", message: "Cross-origin request rejected." });
       }
       const identity = await identityForPermission(request, reply, "tables.create");
@@ -826,7 +882,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       },
     },
     async (request, reply) => {
-      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"])) {
+      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"], request.headers["x-forwarded-host"])) {
         return reply.code(403).send({ code: "FORBIDDEN", message: "Cross-origin request rejected." });
       }
       const identity = await identityForAnyPermission(request, reply, ["tables.create", "tables.update", "tables.view"]);
@@ -907,7 +963,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       },
     },
     async (request, reply) => {
-      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"])) {
+      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"], request.headers["x-forwarded-host"])) {
         return reply.code(403).send({ code: "FORBIDDEN", message: "Cross-origin request rejected." });
       }
       const identity = await identityForPermission(request, reply, "menu.create");
@@ -989,7 +1045,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       },
     },
     async (request, reply) => {
-      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"])) {
+      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"], request.headers["x-forwarded-host"])) {
         return reply.code(403).send({ code: "FORBIDDEN", message: "Cross-origin request rejected." });
       }
       const identity = await identityForPermission(request, reply, "menu.create");
@@ -1074,7 +1130,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       },
     },
     async (request, reply) => {
-      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"])) {
+      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"], request.headers["x-forwarded-host"])) {
         return reply.code(403).send({ code: "FORBIDDEN", message: "Cross-origin request rejected." });
       }
       const identity = await identityForPermission(request, reply, "orders.create");
@@ -1129,7 +1185,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       },
     },
     async (request, reply) => {
-      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"])) {
+      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"], request.headers["x-forwarded-host"])) {
         return reply.code(403).send({ code: "FORBIDDEN", message: "Cross-origin request rejected." });
       }
       const identity = await identityForPermission(request, reply, "kot.update_status");
@@ -1180,7 +1236,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       },
     },
     async (request, reply) => {
-      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"])) {
+      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"], request.headers["x-forwarded-host"])) {
         return reply.code(403).send({ code: "FORBIDDEN", message: "Cross-origin request rejected." });
       }
       const identity = await identityForPermission(request, reply, "orders.create");
@@ -1299,7 +1355,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       },
     },
     async (request, reply) => {
-      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"])) {
+      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"], request.headers["x-forwarded-host"])) {
         return reply.code(403).send({ code: "FORBIDDEN", message: "Cross-origin request rejected." });
       }
       const identity = await identityForPermission(request, reply, "customers.create");
@@ -1421,7 +1477,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
       },
     },
     async (request, reply) => {
-      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"])) {
+      if (!isAllowedOrigin(request.headers.origin, request.headers.host, request.headers["sec-fetch-site"], request.headers["x-forwarded-host"])) {
         return reply.code(403).send({ code: "FORBIDDEN", message: "Cross-origin request rejected." });
       }
       const identity = await identityForPermission(request, reply, "users.create");
