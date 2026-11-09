@@ -1,0 +1,1220 @@
+// RestaurantOS - Prisma schema v2
+// Conventions:
+//  * Every restaurant-owned aggregate root has @@unique([id, restaurantId]) so children can use
+//    composite FKs ([xId, restaurantId] -> [id, restaurantId]) and the DB rejects cross-tenant links.
+//  * Required relations default to ON DELETE RESTRICT. Optional composite relations set onDelete: Restrict
+//    explicitly (SetNull is invalid when a referenced column is required). Only token/join rows cascade.
+//  * Money NUMERIC(12,2), quantities NUMERIC(14,3), rates NUMERIC(7,4), timestamps TIMESTAMPTZ(6).
+//  * CHECK constraints, partial indexes and immutability triggers live in prisma/sql/constraints.sql.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────── Enums ─────────────
+enum RecordStatus {
+  ACTIVE
+  INACTIVE
+}
+enum TableStatus {
+  AVAILABLE
+  OCCUPIED
+  RESERVED
+  BILLING
+  CLEANING
+}
+enum SessionStatus {
+  OPEN
+  CLOSED
+}
+enum ReservationStatus {
+  BOOKED
+  SEATED
+  CANCELLED
+  NO_SHOW
+}
+enum OrderType {
+  DINE_IN
+  PARCEL
+}
+enum OrderSource {
+  QR_CUSTOMER
+  STAFF_POS
+}
+enum OrderStatus {
+  DRAFT
+  PLACED
+  ACCEPTED
+  PREPARING
+  READY
+  SERVED
+  COMPLETED
+  SETTLED
+  CANCELLED
+}
+enum KotStatus {
+  NEW
+  ACCEPTED
+  PREPARING
+  READY
+  SERVED
+  CANCELLED
+}
+enum InvoiceStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+  VOID
+  REFUNDED
+}
+enum PaymentMethod {
+  CASH
+  UPI
+  CARD
+  OTHER
+}
+enum PaymentStatus {
+  RECORDED
+  VOIDED
+  REFUNDED
+}
+enum DiscountType {
+  FIXED
+  PERCENT
+}
+enum MovementType {
+  OPENING
+  PURCHASE
+  SALE
+  WASTAGE
+  ADJUSTMENT
+  REVERSAL
+}
+enum DietType {
+  VEG
+  NON_VEG
+  EGG
+}
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  PUBLISHED
+  FAILED
+}
+enum DeliveryStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+enum SequenceType {
+  ORDER
+  INVOICE
+  KOT
+  PAYMENT
+  PURCHASE
+  EMPLOYEE
+}
+enum PurchaseStatus {
+  DRAFT
+  RECEIVED
+  CANCELLED
+}
+enum SettlementStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+}
+enum RegisterStatus {
+  OPEN
+  CLOSED
+}
+enum CashTxnType {
+  OPENING
+  SALE_RECEIPT
+  EXPENSE_PAYOUT
+  PURCHASE_PAYOUT
+  SALARY_PAYOUT
+  REFUND_PAYOUT
+  ADJUSTMENT
+  CLOSING
+}
+enum FinancialTxnType {
+  SALES_REVENUE
+  TAX_COLLECTED
+  DISCOUNT_GIVEN
+  PAYMENT_COLLECTED
+  REFUND
+  EXPENSE
+  PURCHASE
+  SALARY
+  OTHER_INCOME
+}
+enum EmployeeStatus {
+  ACTIVE
+  ON_LEAVE
+  INACTIVE
+}
+enum SalaryType {
+  MONTHLY
+  DAILY
+  HOURLY
+}
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  HALF_DAY
+  PAID_LEAVE
+  UNPAID_LEAVE
+  HOLIDAY
+}
+enum PayrollStatus {
+  DRAFT
+  APPROVED
+  PAID
+  CANCELLED
+}
+enum PayrollItemType {
+  BASIC
+  ALLOWANCE
+  INCENTIVE
+  DEDUCTION
+  LEAVE_DEDUCTION
+  ADVANCE_ADJUSTMENT
+  CORRECTION
+}
+
+// ───────────── Platform ─────────────
+// Platform-wide super admin: separate identity, not a restaurant role. Never assigned restaurant permissions.
+model PlatformAdmin {
+  id           String @id @default(uuid()) @db.Uuid
+  name         String
+  email        String @unique
+  passwordHash String
+  status       RecordStatus @default(ACTIVE)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+}
+
+// ───────────── Restaurant / RBAC ─────────────
+model Restaurant {
+  id        String @id @default(uuid()) @db.Uuid
+  name      String
+  slug      String @unique
+  logoUrl   String?
+  gstin     String?
+  address   String?
+  phone     String?
+  timezone  String @default("Asia/Kolkata")
+  currency  String @default("INR") @db.Char(3)
+  status    RecordStatus @default(ACTIVE)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  deletedAt DateTime? @db.Timestamptz(6)
+
+  settings RestaurantSettings?
+  users User[]
+  roles Role[]
+}
+
+model RestaurantSettings {
+  id             String @id @default(uuid()) @db.Uuid
+  restaurantId   String @unique @db.Uuid
+  invoicePrefix  String @default("INV")
+  orderPrefix    String @default("ORD")
+  kotPrefix      String @default("KOT")
+  paymentPrefix  String @default("PAY")
+  invoiceFooter  String?
+  receiptNotes   String?
+  taxType        String @default("GST")
+  taxInclusivePricing Boolean @default(false)
+  serviceChargePct Decimal @default(0) @db.Decimal(7, 4)
+  packagingCharge  Decimal @default(0) @db.Decimal(12, 2)
+  roundingMode   String @default("NONE")   // NONE | NEAREST_1
+  allowNegativeStock Boolean @default(false)
+  maxDiscountPctByRole Json @default("{}")  // e.g. {"Manager": 10, "Admin": 25}; enforced in billing service
+  preferences    Json @default("{}")
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+  restaurant     Restaurant @relation(fields: [restaurantId], references: [id])
+}
+
+model User {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  name         String
+  email        String @unique       // one global login identity; membership = restaurantId
+  phone        String?
+  passwordHash String
+  status       RecordStatus @default(ACTIVE)
+  lastLoginAt  DateTime? @db.Timestamptz(6)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+  deletedAt    DateTime? @db.Timestamptz(6)
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id])
+  userRoles UserRole[]
+  refreshTokens RefreshToken[]
+  employee Employee?
+  @@unique([id, restaurantId])
+  @@index([restaurantId])
+  @@index([phone])
+}
+
+model Role {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  name         String
+  description  String?
+  isSystem     Boolean @default(false)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id])
+  rolePermissions RolePermission[]
+  userRoles UserRole[]
+  @@unique([restaurantId, name])
+  @@unique([id, restaurantId])
+}
+
+model Permission {
+  id            String @id @default(uuid()) @db.Uuid
+  module        String
+  action        String
+  permissionKey String @unique
+  description   String?
+  rolePermissions RolePermission[]
+}
+
+model RolePermission {
+  roleId       String @db.Uuid
+  permissionId String @db.Uuid
+  role       Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id])
+  @@id([roleId, permissionId])
+}
+
+model UserRole {
+  userId       String @db.Uuid
+  roleId       String @db.Uuid
+  restaurantId String @db.Uuid
+  assignedById String? @db.Uuid
+  assignedAt   DateTime @default(now()) @db.Timestamptz(6)
+  user User @relation(fields: [userId, restaurantId], references: [id, restaurantId], onDelete: Cascade)
+  role Role @relation(fields: [roleId, restaurantId], references: [id, restaurantId])
+  @@id([userId, roleId])
+  @@index([userId, restaurantId])
+  @@index([restaurantId, roleId])
+}
+
+model RefreshToken {
+  id         String @id @default(uuid()) @db.Uuid
+  userId     String @db.Uuid
+  familyId   String @db.Uuid
+  tokenHash  String @unique
+  expiresAt  DateTime @db.Timestamptz(6)
+  revokedAt  DateTime? @db.Timestamptz(6)
+  replacedBy String? @db.Uuid
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId])
+  @@index([familyId])
+}
+
+model AuditLog {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  userId       String? @db.Uuid
+  action       String
+  entity       String
+  entityId     String?
+  metadata     Json?
+  ip           String?
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  @@index([restaurantId, createdAt])
+  @@index([restaurantId, entity, entityId])
+}
+
+// ───────────── Tables, QR, sessions ─────────────
+model RestaurantTable {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  tableNumber  String
+  capacity     Int @default(4)
+  status       TableStatus @default(AVAILABLE)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+  deletedAt    DateTime? @db.Timestamptz(6)
+
+  qrCodes TableQrCode[]
+  sessions TableSession[]
+  reservations TableReservation[]
+  customerSessions CustomerQrSession[]
+  @@unique([restaurantId, tableNumber])
+  @@unique([id, restaurantId])
+}
+
+// Static printed QR. Token is random 32 bytes; only its SHA-256 is stored.
+model TableQrCode {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  tableId      String @db.Uuid
+  tokenHash    String @unique
+  version      Int @default(1)
+  isActive     Boolean @default(true)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  table RestaurantTable @relation(fields: [tableId, restaurantId], references: [id, restaurantId])
+  customerSessions CustomerQrSession[]
+  @@unique([id, restaurantId])
+  @@index([tableId, isActive])
+}
+
+// Per-diner ordering session issued after QR resolve. Different purpose and token from the printed QR.
+model CustomerQrSession {
+  id             String @id @default(uuid()) @db.Uuid
+  restaurantId   String @db.Uuid
+  tableId        String @db.Uuid
+  qrCodeId       String @db.Uuid
+  customerId     String? @db.Uuid
+  tokenHash      String @unique
+  expiresAt      DateTime @db.Timestamptz(6)
+  revokedAt      DateTime? @db.Timestamptz(6)
+  lastActivityAt DateTime @default(now()) @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+
+  table RestaurantTable @relation(fields: [tableId, restaurantId], references: [id, restaurantId])
+  qrCode TableQrCode @relation(fields: [qrCodeId, restaurantId], references: [id, restaurantId])
+  customer Customer? @relation(fields: [customerId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+  orders Order[]
+  @@unique([id, restaurantId])
+  @@index([restaurantId, tableId])
+  @@index([expiresAt])
+}
+
+model TableSession {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  tableId      String @db.Uuid
+  status       SessionStatus @default(OPEN)
+  openedAt     DateTime @default(now()) @db.Timestamptz(6)
+  closedAt     DateTime? @db.Timestamptz(6)
+  table RestaurantTable @relation(fields: [tableId, restaurantId], references: [id, restaurantId])
+  orders Order[]
+  @@unique([id, restaurantId])
+  @@index([restaurantId, status])
+  @@index([tableId, status])
+}
+
+model TableReservation {
+  id              String @id @default(uuid()) @db.Uuid
+  restaurantId    String @db.Uuid
+  tableId         String @db.Uuid
+  customerId      String? @db.Uuid
+  partySize       Int
+  reservationTime DateTime @db.Timestamptz(6)
+  status          ReservationStatus @default(BOOKED)
+  notes           String?
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  table RestaurantTable @relation(fields: [tableId, restaurantId], references: [id, restaurantId])
+  customer Customer? @relation(fields: [customerId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+  @@index([restaurantId, reservationTime])
+}
+
+// ───────────── Menu ─────────────
+model TaxRate {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  name         String
+  rate         Decimal @db.Decimal(7, 4)
+  isActive     Boolean @default(true)
+  items MenuItem[]
+  @@unique([restaurantId, name])
+  @@unique([id, restaurantId])
+}
+
+model MenuCategory {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  name         String
+  displayOrder Int @default(0)
+  isActive     Boolean @default(true)
+  deletedAt    DateTime? @db.Timestamptz(6)
+  items MenuItem[]
+  @@unique([restaurantId, name])
+  @@unique([id, restaurantId])
+}
+
+model MenuItem {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  categoryId   String @db.Uuid
+  taxRateId    String? @db.Uuid
+  name         String
+  description  String?
+  imageUrl     String?
+  diet         DietType @default(VEG)
+  price        Decimal @db.Decimal(12, 2)
+  isAvailable  Boolean @default(true)
+  displayOrder Int @default(0)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+  deletedAt    DateTime? @db.Timestamptz(6)
+
+  category MenuCategory @relation(fields: [categoryId, restaurantId], references: [id, restaurantId])
+  taxRate TaxRate? @relation(fields: [taxRateId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+  variants MenuItemVariant[]
+  addons MenuItemAddon[]
+  recipe Recipe?
+  orderItems OrderItem[]
+  @@unique([id, restaurantId])
+  @@index([restaurantId, categoryId])
+}
+
+model MenuItemVariant {
+  id         String @id @default(uuid()) @db.Uuid
+  menuItemId String @db.Uuid
+  name       String
+  priceDelta Decimal @default(0) @db.Decimal(12, 2)
+  isActive   Boolean @default(true)
+  menuItem MenuItem @relation(fields: [menuItemId], references: [id])
+  @@unique([menuItemId, name])
+}
+
+model Addon {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  name         String
+  price        Decimal @db.Decimal(12, 2)
+  isActive     Boolean @default(true)
+  items MenuItemAddon[]
+  @@unique([restaurantId, name])
+  @@unique([id, restaurantId])
+}
+
+model MenuItemAddon {
+  menuItemId   String @db.Uuid
+  addonId      String @db.Uuid
+  restaurantId String @db.Uuid
+  menuItem MenuItem @relation(fields: [menuItemId, restaurantId], references: [id, restaurantId])
+  addon Addon @relation(fields: [addonId, restaurantId], references: [id, restaurantId])
+  @@id([menuItemId, addonId])
+}
+
+// ───────────── Customers & Orders ─────────────
+model Customer {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  name         String?
+  phone        String?
+  email        String?
+  address      String?
+  notes        String?
+  status       RecordStatus @default(ACTIVE)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  orders Order[]
+  sessions CustomerQrSession[]
+  reservations TableReservation[]
+  @@unique([id, restaurantId])
+  @@index([restaurantId, phone])
+}
+
+model Order {
+  id              String @id @default(uuid()) @db.Uuid
+  restaurantId    String @db.Uuid
+  orderNumber     String
+  type            OrderType
+  source          OrderSource
+  status          OrderStatus @default(DRAFT)
+  tableSessionId  String? @db.Uuid
+  customerId      String? @db.Uuid
+  qrSessionId     String? @db.Uuid
+  createdById     String? @db.Uuid
+  notes           String?
+  subtotal        Decimal @default(0) @db.Decimal(12, 2)
+  discountTotal   Decimal @default(0) @db.Decimal(12, 2)
+  taxTotal        Decimal @default(0) @db.Decimal(12, 2)
+  serviceCharge   Decimal @default(0) @db.Decimal(12, 2)
+  packagingCharge Decimal @default(0) @db.Decimal(12, 2)
+  grandTotal      Decimal @default(0) @db.Decimal(12, 2)
+  stockDeducted   Boolean @default(false)
+  acceptedAt      DateTime? @db.Timestamptz(6)
+  cancelReason    String?
+  mergedIntoId    String? @db.Uuid
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(6)
+
+  session TableSession? @relation(fields: [tableSessionId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+  customer Customer? @relation(fields: [customerId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+  qrSession CustomerQrSession? @relation(fields: [qrSessionId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+  mergedInto Order? @relation("OrderMerge", fields: [mergedIntoId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+  mergedFrom Order[] @relation("OrderMerge")
+  items OrderItem[]
+  history OrderStatusHistory[]
+  kots KotTicket[]
+  invoice Invoice?
+  consumptions OrderIngredientConsumption[]
+  @@unique([restaurantId, orderNumber])
+  @@unique([id, restaurantId])
+  @@index([restaurantId, status, createdAt])
+  @@index([restaurantId, tableSessionId])
+}
+
+model OrderItem {
+  id             String @id @default(uuid()) @db.Uuid
+  restaurantId   String @db.Uuid
+  orderId        String @db.Uuid
+  menuItemId     String @db.Uuid
+  itemName       String
+  variantName    String?
+  variantDelta   Decimal @default(0) @db.Decimal(12, 2)
+  quantity       Int
+  unitPrice      Decimal @db.Decimal(12, 2)
+  taxRate        Decimal @default(0) @db.Decimal(7, 4)
+  discountAmount Decimal @default(0) @db.Decimal(12, 2)
+  taxAmount      Decimal @default(0) @db.Decimal(12, 2)
+  total          Decimal @db.Decimal(12, 2)
+  instructions   String?
+  cancelledAt    DateTime? @db.Timestamptz(6)
+
+  order Order @relation(fields: [orderId, restaurantId], references: [id, restaurantId])
+  menuItem MenuItem @relation(fields: [menuItemId, restaurantId], references: [id, restaurantId])
+  addons OrderItemAddon[]
+  kotItems KotItem[]
+  history OrderItemStatusHistory[]
+  consumptions OrderIngredientConsumption[]
+  @@unique([id, orderId])
+  @@unique([id, restaurantId])
+  @@index([orderId])
+  @@index([menuItemId])
+}
+
+model OrderItemAddon {
+  id          String @id @default(uuid()) @db.Uuid
+  orderItemId String @db.Uuid
+  addonName   String
+  price       Decimal @db.Decimal(12, 2)
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id])
+}
+
+model OrderStatusHistory {
+  id        String @id @default(uuid()) @db.Uuid
+  orderId   String @db.Uuid
+  oldStatus OrderStatus?
+  newStatus OrderStatus
+  changedBy String? @db.Uuid
+  reason    String?
+  changedAt DateTime @default(now()) @db.Timestamptz(6)
+  order Order @relation(fields: [orderId], references: [id])
+  @@index([orderId, changedAt])
+}
+
+model OrderItemStatusHistory {
+  id          String @id @default(uuid()) @db.Uuid
+  orderItemId String @db.Uuid
+  status      KotStatus
+  changedBy   String? @db.Uuid
+  reason      String?
+  changedAt   DateTime @default(now()) @db.Timestamptz(6)
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id])
+  @@index([orderItemId, changedAt])
+}
+
+// ───────────── KOT ─────────────
+model KotTicket {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  orderId      String @db.Uuid
+  kotNumber    String
+  status       KotStatus @default(NEW)
+  priority     Int @default(0)
+  cancelReason String?
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+  order Order @relation(fields: [orderId, restaurantId], references: [id, restaurantId])
+  items KotItem[]
+  history KotStatusHistory[]
+  @@unique([restaurantId, kotNumber])
+  @@unique([id, orderId])
+  @@index([restaurantId, status, createdAt])
+}
+
+// kot and orderItem must share the same orderId (enforced by both composite FKs).
+model KotItem {
+  id           String @id @default(uuid()) @db.Uuid
+  kotId        String @db.Uuid
+  orderId      String @db.Uuid
+  orderItemId  String @db.Uuid
+  quantity     Int
+  status       KotStatus @default(NEW)
+  instructions String?
+  cancelReason String?
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+  kot KotTicket @relation(fields: [kotId, orderId], references: [id, orderId])
+  orderItem OrderItem @relation(fields: [orderItemId, orderId], references: [id, orderId])
+  @@unique([kotId, orderItemId])
+  @@index([kotId, status])
+}
+
+model KotStatusHistory {
+  id        String @id @default(uuid()) @db.Uuid
+  kotId     String @db.Uuid
+  status    KotStatus
+  changedBy String? @db.Uuid
+  changedAt DateTime @default(now()) @db.Timestamptz(6)
+  kot KotTicket @relation(fields: [kotId], references: [id])
+  @@index([kotId])
+}
+
+// ───────────── Billing ─────────────
+model Invoice {
+  id              String @id @default(uuid()) @db.Uuid
+  restaurantId    String @db.Uuid
+  orderId         String @unique @db.Uuid
+  invoiceNumber   String
+  status          InvoiceStatus @default(UNPAID)
+  subtotal        Decimal @db.Decimal(12, 2)
+  discountType    DiscountType?
+  discountValue   Decimal? @db.Decimal(12, 2)
+  discountReason  String?
+  discountTotal   Decimal @default(0) @db.Decimal(12, 2)
+  taxTotal        Decimal @db.Decimal(12, 2)
+  serviceCharge   Decimal @default(0) @db.Decimal(12, 2)
+  packagingCharge Decimal @default(0) @db.Decimal(12, 2)
+  roundOff        Decimal @default(0) @db.Decimal(12, 2)
+  grandTotal      Decimal @db.Decimal(12, 2)
+  paidAmount      Decimal @default(0) @db.Decimal(12, 2)   // cache of live allocations
+  notes           String?
+  issuedAt        DateTime @default(now()) @db.Timestamptz(6)
+  issuedById      String? @db.Uuid
+  voidedAt        DateTime? @db.Timestamptz(6)
+  voidedById      String? @db.Uuid
+  voidReason      String?
+  originalInvoiceId String? @db.Uuid
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(6)
+
+  order Order @relation(fields: [orderId, restaurantId], references: [id, restaurantId])
+  original Invoice? @relation("InvoiceCorrection", fields: [originalInvoiceId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+  corrections Invoice[] @relation("InvoiceCorrection")
+  items InvoiceItem[]
+  allocations PaymentAllocation[]
+  history InvoiceStatusHistory[]
+  @@unique([restaurantId, invoiceNumber])
+  @@unique([orderId, restaurantId])
+  @@unique([id, restaurantId])
+  @@index([restaurantId, status, createdAt])
+}
+
+model InvoiceItem {
+  id             String @id @default(uuid()) @db.Uuid
+  invoiceId      String @db.Uuid
+  description    String
+  quantity       Int
+  unitPrice      Decimal @db.Decimal(12, 2)
+  discountAmount Decimal @default(0) @db.Decimal(12, 2)
+  taxRate        Decimal @db.Decimal(7, 4)
+  taxAmount      Decimal @db.Decimal(12, 2)
+  total          Decimal @db.Decimal(12, 2)
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+}
+
+model InvoiceStatusHistory {
+  id        String @id @default(uuid()) @db.Uuid
+  invoiceId String @db.Uuid
+  oldStatus InvoiceStatus?
+  newStatus InvoiceStatus
+  changedBy String? @db.Uuid
+  reason    String?
+  changedAt DateTime @default(now()) @db.Timestamptz(6)
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+  @@index([invoiceId, changedAt])
+}
+
+model Payment {
+  id              String @id @default(uuid()) @db.Uuid
+  restaurantId    String @db.Uuid
+  paymentNumber   String
+  method          PaymentMethod
+  amount          Decimal @db.Decimal(12, 2)
+  tenderedAmount  Decimal? @db.Decimal(12, 2)   // cash only; change = tendered - amount
+  referenceNumber String?
+  status          PaymentStatus @default(RECORDED)
+  receivedById    String? @db.Uuid
+  idempotencyKey  String?
+  notes           String?
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  allocations PaymentAllocation[]
+  @@unique([restaurantId, paymentNumber])
+  @@unique([restaurantId, idempotencyKey])
+  @@unique([id, restaurantId])
+  @@index([restaurantId, createdAt])
+  @@index([restaurantId, method, createdAt])
+}
+
+model PaymentAllocation {
+  id              String @id @default(uuid()) @db.Uuid
+  restaurantId    String @db.Uuid
+  paymentId       String @db.Uuid
+  invoiceId       String @db.Uuid
+  allocatedAmount Decimal @db.Decimal(12, 2)
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  payment Payment @relation(fields: [paymentId, restaurantId], references: [id, restaurantId])
+  invoice Invoice @relation(fields: [invoiceId, restaurantId], references: [id, restaurantId])
+  @@unique([paymentId, invoiceId])
+  @@index([invoiceId])
+}
+
+// ───────────── Inventory ─────────────
+model Unit {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  name         String
+  abbreviation String
+  ingredients Ingredient[]
+  conversionsFrom UnitConversion[] @relation("ConvFrom")
+  conversionsTo UnitConversion[] @relation("ConvTo")
+  @@unique([restaurantId, abbreviation])
+  @@unique([id, restaurantId])
+}
+
+model UnitConversion {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  fromUnitId   String @db.Uuid
+  toUnitId     String @db.Uuid
+  factor       Decimal @db.Decimal(18, 6)   // 1 from = factor to
+  from Unit @relation("ConvFrom", fields: [fromUnitId, restaurantId], references: [id, restaurantId])
+  to Unit @relation("ConvTo", fields: [toUnitId, restaurantId], references: [id, restaurantId])
+  @@unique([restaurantId, fromUnitId, toUnitId])
+}
+
+model IngredientCategory {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  name         String
+  ingredients Ingredient[]
+  @@unique([restaurantId, name])
+  @@unique([id, restaurantId])
+}
+
+model Ingredient {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  categoryId   String? @db.Uuid
+  unitId       String @db.Uuid
+  name         String
+  currentStock Decimal @default(0) @db.Decimal(14, 3)   // cache; InventoryMovement is the source of truth
+  minimumStock Decimal @default(0) @db.Decimal(14, 3)
+  avgUnitCost  Decimal @default(0) @db.Decimal(12, 4)   // weighted average, updated on purchase receipt
+  isActive     Boolean @default(true)
+  deletedAt    DateTime? @db.Timestamptz(6)
+  category IngredientCategory? @relation(fields: [categoryId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+  unit Unit @relation(fields: [unitId, restaurantId], references: [id, restaurantId])
+  recipeItems RecipeItem[]
+  movements InventoryMovement[]
+  purchaseItems PurchaseItem[]
+  consumptions OrderIngredientConsumption[]
+  @@unique([restaurantId, name])
+  @@unique([id, restaurantId])
+  @@index([restaurantId, isActive])
+}
+
+model Recipe {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  menuItemId   String @unique @db.Uuid
+  version      Int @default(1)      // bump on every recipe change; consumption snapshots record the version used
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+  menuItem MenuItem @relation(fields: [menuItemId, restaurantId], references: [id, restaurantId])
+  items RecipeItem[]
+  @@unique([id, restaurantId])
+  @@unique([menuItemId, restaurantId])
+}
+
+model RecipeItem {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  recipeId     String @db.Uuid
+  ingredientId String @db.Uuid
+  quantity     Decimal @db.Decimal(14, 3)
+  recipe Recipe @relation(fields: [recipeId, restaurantId], references: [id, restaurantId])
+  ingredient Ingredient @relation(fields: [ingredientId, restaurantId], references: [id, restaurantId])
+  @@unique([recipeId, ingredientId])
+}
+
+// Snapshot of what an accepted order consumes. Later recipe edits never change it; cancellation reverses from here.
+model OrderIngredientConsumption {
+  id            String @id @default(uuid()) @db.Uuid
+  restaurantId  String @db.Uuid
+  orderId       String @db.Uuid
+  orderItemId   String @db.Uuid
+  ingredientId  String @db.Uuid
+  quantity      Decimal @db.Decimal(14, 3)
+  unitAbbr      String
+  recipeVersion Int
+  reversedAt    DateTime? @db.Timestamptz(6)
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  order Order @relation(fields: [orderId, restaurantId], references: [id, restaurantId])
+  orderItem OrderItem @relation(fields: [orderItemId, orderId], references: [id, orderId])
+  ingredient Ingredient @relation(fields: [ingredientId, restaurantId], references: [id, restaurantId])
+  movements InventoryMovement[]
+  @@unique([id, restaurantId])
+  @@index([orderId])
+}
+
+// Append-only (enforced by trigger in constraints.sql). A movement can be reversed at most once.
+model InventoryMovement {
+  id            String @id @default(uuid()) @db.Uuid
+  restaurantId  String @db.Uuid
+  ingredientId  String @db.Uuid
+  consumptionId String? @db.Uuid
+  type          MovementType
+  quantity      Decimal @db.Decimal(14, 3)   // signed: negative = stock out
+  balanceAfter  Decimal @db.Decimal(14, 3)
+  unitCost      Decimal? @db.Decimal(12, 4)
+  referenceType String?
+  referenceId   String? @db.Uuid
+  reversesId    String? @unique @db.Uuid
+  reason        String?
+  createdById   String? @db.Uuid
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  ingredient Ingredient @relation(fields: [ingredientId, restaurantId], references: [id, restaurantId])
+  consumption OrderIngredientConsumption? @relation(fields: [consumptionId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+  reverses InventoryMovement? @relation("MovementReversal", fields: [reversesId], references: [id])
+  reversedBy InventoryMovement? @relation("MovementReversal")
+  @@index([restaurantId, ingredientId, createdAt])
+  @@index([restaurantId, createdAt])
+  @@index([referenceType, referenceId])
+}
+
+model Supplier {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  name         String
+  phone        String?
+  email        String?
+  address      String?
+  gstin        String?
+  isActive     Boolean @default(true)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  deletedAt    DateTime? @db.Timestamptz(6)
+  purchases Purchase[]
+  @@unique([restaurantId, name])
+  @@unique([id, restaurantId])
+}
+
+model Purchase {
+  id             String @id @default(uuid()) @db.Uuid
+  restaurantId   String @db.Uuid
+  supplierId     String @db.Uuid
+  purchaseNumber String
+  status         PurchaseStatus @default(DRAFT)
+  paymentStatus  SettlementStatus @default(UNPAID)
+  purchaseDate   DateTime @db.Date
+  subtotal       Decimal @db.Decimal(12, 2)
+  taxTotal       Decimal @default(0) @db.Decimal(12, 2)
+  total          Decimal @db.Decimal(12, 2)
+  paidAmount     Decimal @default(0) @db.Decimal(12, 2)
+  receivedAt     DateTime? @db.Timestamptz(6)
+  createdById    String? @db.Uuid
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  supplier Supplier @relation(fields: [supplierId, restaurantId], references: [id, restaurantId])
+  items PurchaseItem[]
+  @@unique([restaurantId, purchaseNumber])
+  @@unique([id, restaurantId])
+  @@index([restaurantId, purchaseDate])
+}
+
+model PurchaseItem {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  purchaseId   String @db.Uuid
+  ingredientId String @db.Uuid
+  quantity     Decimal @db.Decimal(14, 3)
+  unitCost     Decimal @db.Decimal(12, 4)
+  total        Decimal @db.Decimal(12, 2)
+  purchase Purchase @relation(fields: [purchaseId, restaurantId], references: [id, restaurantId])
+  ingredient Ingredient @relation(fields: [ingredientId, restaurantId], references: [id, restaurantId])
+  @@index([purchaseId])
+}
+
+// ───────────── Accounting ─────────────
+model ExpenseCategory {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  name         String
+  expenses Expense[]
+  @@unique([restaurantId, name])
+  @@unique([id, restaurantId])
+}
+
+model Expense {
+  id            String @id @default(uuid()) @db.Uuid
+  restaurantId  String @db.Uuid
+  categoryId    String @db.Uuid
+  amount        Decimal @db.Decimal(12, 2)
+  expenseDate   DateTime @db.Date
+  description   String?
+  paymentMethod PaymentMethod
+  paymentStatus SettlementStatus @default(PAID)
+  voidedAt      DateTime? @db.Timestamptz(6)
+  createdById   String? @db.Uuid
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(6)
+  category ExpenseCategory @relation(fields: [categoryId, restaurantId], references: [id, restaurantId])
+  @@index([restaurantId, expenseDate])
+}
+
+model CashRegister {
+  id                String @id @default(uuid()) @db.Uuid
+  restaurantId      String @db.Uuid
+  openedById        String @db.Uuid
+  closedById        String? @db.Uuid
+  openingBalance    Decimal @db.Decimal(12, 2)
+  expectedClosing   Decimal? @db.Decimal(12, 2)
+  closingBalance    Decimal? @db.Decimal(12, 2)
+  discrepancy       Decimal? @db.Decimal(12, 2)   // counted - expected
+  status            RegisterStatus @default(OPEN)
+  openedAt          DateTime @default(now()) @db.Timestamptz(6)
+  closedAt          DateTime? @db.Timestamptz(6)
+  transactions CashRegisterTransaction[]
+  @@unique([id, restaurantId])
+  @@index([restaurantId, status])
+}
+
+model CashRegisterTransaction {
+  id            String @id @default(uuid()) @db.Uuid
+  restaurantId  String @db.Uuid
+  registerId    String @db.Uuid
+  type          CashTxnType
+  amount        Decimal @db.Decimal(12, 2)   // signed
+  referenceType String?
+  referenceId   String? @db.Uuid
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  register CashRegister @relation(fields: [registerId, restaurantId], references: [id, restaurantId])
+  @@index([registerId])
+}
+
+// Immutable operational ledger. Sales, tax, discounts, collections and expenses are distinct types.
+model FinancialTransaction {
+  id              String @id @default(uuid()) @db.Uuid
+  restaurantId    String @db.Uuid
+  type            FinancialTxnType
+  sourceType      String
+  sourceId        String @db.Uuid
+  amount          Decimal @db.Decimal(12, 2)   // signed
+  transactionDate DateTime @db.Timestamptz(6)
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  @@unique([restaurantId, type, sourceType, sourceId])
+  @@index([restaurantId, transactionDate])
+}
+
+// ───────────── Employees & payroll ─────────────
+model Employee {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  userId       String? @unique @db.Uuid
+  employeeCode String
+  fullName     String
+  mobile       String?
+  email        String?
+  address      String?
+  designation  String
+  joiningDate  DateTime @db.Date
+  salaryType   SalaryType @default(MONTHLY)
+  status       EmployeeStatus @default(ACTIVE)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+  deletedAt    DateTime? @db.Timestamptz(6)
+
+  user User? @relation(fields: [userId, restaurantId], references: [id, restaurantId], onDelete: Restrict)
+  attendance Attendance[]
+  salaryStructures SalaryStructure[]
+  payrolls Payroll[]
+  @@unique([restaurantId, employeeCode])
+  @@unique([userId, restaurantId])
+  @@unique([id, restaurantId])
+}
+
+model Attendance {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  employeeId   String @db.Uuid
+  date         DateTime @db.Date
+  status       AttendanceStatus
+  checkIn      DateTime? @db.Timestamptz(6)
+  checkOut     DateTime? @db.Timestamptz(6)
+  employee Employee @relation(fields: [employeeId, restaurantId], references: [id, restaurantId])
+  @@unique([employeeId, date])
+}
+
+model SalaryStructure {
+  id            String @id @default(uuid()) @db.Uuid
+  restaurantId  String @db.Uuid
+  employeeId    String @db.Uuid
+  basicSalary   Decimal @db.Decimal(12, 2)
+  allowances    Json @default("[]")    // [{name, amount}]
+  effectiveFrom DateTime @db.Date
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  employee Employee @relation(fields: [employeeId, restaurantId], references: [id, restaurantId])
+  @@unique([employeeId, effectiveFrom])
+}
+
+// After APPROVED the row and its items are immutable (trigger). Fixes are CORRECTION items on a new payroll row.
+model Payroll {
+  id            String @id @default(uuid()) @db.Uuid
+  restaurantId  String @db.Uuid
+  employeeId    String @db.Uuid
+  payrollMonth  DateTime @db.Date      // first day of month
+  grossSalary   Decimal @db.Decimal(12, 2)
+  totalDeductions Decimal @db.Decimal(12, 2)
+  netSalary     Decimal @db.Decimal(12, 2)
+  status        PayrollStatus @default(DRAFT)
+  approvedById  String? @db.Uuid
+  approvedAt    DateTime? @db.Timestamptz(6)
+  lockedAt      DateTime? @db.Timestamptz(6)
+  createdById   String? @db.Uuid
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  employee Employee @relation(fields: [employeeId, restaurantId], references: [id, restaurantId])
+  items PayrollItem[]
+  payments PayrollPayment[]
+  slips PayrollSlip[]
+  @@unique([employeeId, payrollMonth])
+  @@unique([id, restaurantId])
+  @@index([restaurantId, payrollMonth])
+}
+
+model PayrollItem {
+  id          String @id @default(uuid()) @db.Uuid
+  payrollId   String @db.Uuid
+  type        PayrollItemType
+  description String
+  amount      Decimal @db.Decimal(12, 2)
+  payroll Payroll @relation(fields: [payrollId], references: [id])
+}
+
+model PayrollPayment {
+  id            String @id @default(uuid()) @db.Uuid
+  restaurantId  String @db.Uuid
+  payrollId     String @db.Uuid
+  amount        Decimal @db.Decimal(12, 2)
+  method        PaymentMethod
+  paymentDate   DateTime @db.Date
+  reference     String?
+  createdById   String? @db.Uuid
+  payroll Payroll @relation(fields: [payrollId, restaurantId], references: [id, restaurantId])
+  @@index([payrollId])
+}
+
+// Each generated PDF is versioned and checksummed so a slip can be proven unchanged.
+model PayrollSlip {
+  id          String @id @default(uuid()) @db.Uuid
+  payrollId   String @db.Uuid
+  version     Int
+  fileKey     String
+  sha256      String
+  generatedAt DateTime @default(now()) @db.Timestamptz(6)
+  generatedById String? @db.Uuid
+  payroll Payroll @relation(fields: [payrollId], references: [id])
+  @@unique([payrollId, version])
+}
+
+// ───────────── Events, webhooks, idempotency, sequences ─────────────
+// Claim with: SELECT ... WHERE status='PENDING' AND "nextAttemptAt" <= now() ORDER BY sequence FOR UPDATE SKIP LOCKED
+model OutboxEvent {
+  id                  String @id @default(uuid()) @db.Uuid
+  restaurantId        String @db.Uuid
+  sequence            BigInt @default(autoincrement())
+  aggregateType       String
+  aggregateId         String
+  eventType           String
+  payload             Json
+  status              OutboxStatus @default(PENDING)
+  attempts            Int @default(0)
+  nextAttemptAt       DateTime @default(now()) @db.Timestamptz(6)
+  processingStartedAt DateTime? @db.Timestamptz(6)
+  publishedAt         DateTime? @db.Timestamptz(6)
+  failedAt            DateTime? @db.Timestamptz(6)
+  lastError           String?
+  createdAt           DateTime @default(now()) @db.Timestamptz(6)
+  deliveries WebhookDelivery[]
+  @@unique([id, restaurantId])
+  @@index([status, nextAttemptAt])
+  @@index([restaurantId, sequence])
+}
+
+model WebhookEndpoint {
+  id               String @id @default(uuid()) @db.Uuid
+  restaurantId     String @db.Uuid
+  url              String
+  secretEncrypted  String
+  subscribedEvents String[]
+  isActive         Boolean @default(true)
+  createdAt        DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @db.Timestamptz(6)
+  deliveries WebhookDelivery[]
+  @@unique([id, restaurantId])
+  @@index([restaurantId, isActive])
+}
+
+model WebhookDelivery {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  eventId      String @db.Uuid
+  endpointId   String @db.Uuid
+  status       DeliveryStatus @default(PENDING)
+  attempts     Int @default(0)
+  nextRetryAt  DateTime? @db.Timestamptz(6)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  event OutboxEvent @relation(fields: [eventId, restaurantId], references: [id, restaurantId])
+  endpoint WebhookEndpoint @relation(fields: [endpointId, restaurantId], references: [id, restaurantId])
+  attemptLog WebhookDeliveryAttempt[]
+  @@unique([eventId, endpointId])
+  @@index([status, nextRetryAt])
+  @@index([endpointId, status, nextRetryAt])
+}
+
+model WebhookDeliveryAttempt {
+  id            String @id @default(uuid()) @db.Uuid
+  deliveryId    String @db.Uuid
+  attemptNumber Int
+  responseCode  Int?
+  responseSnippet String?     // truncated; never store full bodies indefinitely
+  error         String?
+  durationMs    Int?
+  attemptedAt   DateTime @default(now()) @db.Timestamptz(6)
+  delivery WebhookDelivery @relation(fields: [deliveryId], references: [id])
+  @@unique([deliveryId, attemptNumber])
+}
+
+model IdempotencyKey {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  key          String
+  requestHash  String
+  response     Json?
+  expiresAt    DateTime @db.Timestamptz(6)
+  @@unique([restaurantId, key])
+  @@index([expiresAt])
+}
+
+model NumberSequence {
+  restaurantId String @db.Uuid
+  type         SequenceType
+  nextNumber   Int @default(1)
+  @@id([restaurantId, type])
+}
+
+model Notification {
+  id           String @id @default(uuid()) @db.Uuid
+  restaurantId String @db.Uuid
+  userId       String? @db.Uuid
+  type         String
+  message      String
+  readAt       DateTime? @db.Timestamptz(6)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  @@index([restaurantId, userId, readAt])
+}

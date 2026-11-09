@@ -1,0 +1,8 @@
+/src/generated/prisma/
+/playwright-report/
+/test-results/
+/.vitest/
+node_modules/
+.env
+dist/
+*.log
